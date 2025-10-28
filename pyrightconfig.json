@@ -1,0 +1,14 @@
+{
+  "include": ["."],
+  "reportMissingTypeStubs": false,
+  "reportUnusedImport": "warning",
+  "pythonVersion": "3.12",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "../x_make_common_x"
+      ]
+    }
+  ]
+}
