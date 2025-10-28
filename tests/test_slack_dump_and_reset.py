@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import x_make_slack_dump_and_reset_z.x_cls_make_slack_dump_and_reset_x as module
 from x_make_slack_dump_and_reset_z.x_cls_make_slack_dump_and_reset_x import (
     SCHEMA_VERSION,
     SlackChannelContext,
@@ -117,3 +118,33 @@ def test_run_exports_messages_and_deletes(tmp_path: Path) -> None:
     assert fake_client.downloaded
     assert fake_client.deleted_messages
     assert "F123" in fake_client.deleted_files
+
+
+def test_run_uses_persistent_token_when_payload_missing(tmp_path: Path) -> None:
+    change_control = tmp_path / "Change Control"
+    _prepare_archive_root(change_control)
+    fake_client = FakeSlackClient()
+    runner = _make_runner(fake_client)
+
+    payload = {
+        "command": "x_make_slack_dump_and_reset_x",
+        "parameters": {
+            "channels": ["general"],
+            "archive_root": str(change_control),
+        },
+    }
+
+    original_env = os.environ.get("SLACK_TOKEN")
+    os.environ["SLACK_TOKEN"] = "xoxe-ignored-refresh-token"
+    original_resolver = module._resolve_persistent_slack_token
+    try:
+        module._resolve_persistent_slack_token = lambda: ("xoxp-from-vault", True)  # type: ignore[assignment]
+        result = runner.run(payload)
+    finally:
+        if original_env is not None:
+            os.environ["SLACK_TOKEN"] = original_env
+        else:
+            os.environ.pop("SLACK_TOKEN", None)
+        module._resolve_persistent_slack_token = original_resolver  # type: ignore[assignment]
+
+    assert result["status"] == "success"

@@ -37,6 +37,7 @@ __all__ = [
     "SlackFileRecord",
     "SlackMessageRecord",
     "SlackWebClient",
+    "is_valid_slack_access_token",
 ]
 
 
@@ -108,6 +109,37 @@ def _now_utc() -> datetime:
 
 def _sleep(seconds: float) -> None:
     time.sleep(seconds)
+
+
+def is_valid_slack_access_token(token: str) -> bool:
+    """Return True when the token looks like a usable Slack access token."""
+
+    if not token:
+        return False
+    normalized = token.strip()
+    if not normalized:
+        return False
+    return not normalized.startswith(("xoxe-", "xoxr-"))
+
+
+def _resolve_persistent_slack_token() -> tuple[str | None, bool]:
+    """Return a Slack token from the persistent vault when available."""
+
+    try:
+        from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (
+            x_cls_make_persistent_env_var_x,
+        )
+    except Exception:  # pragma: no cover - optional dependency at runtime
+        return None, False
+
+    try:
+        reader = x_cls_make_persistent_env_var_x("SLACK_TOKEN", quiet=True)
+        persisted = reader.get_user_env()
+    except Exception:
+        return None, False
+    if isinstance(persisted, str) and persisted.strip():
+        return persisted.strip(), True
+    return None, False
 
 
 class SlackWebClient:
@@ -302,15 +334,19 @@ class SlackWebClient:
         method: str,
         url: str,
         *,
-    params: Mapping[str, object] | None = None,
-    json: Mapping[str, object] | None = None,
+        params: Mapping[str, object] | None = None,
+        json: Mapping[str, object] | None = None,
         stream: bool = False,
     ) -> requests.Response:
         backoff = 1.0
         while True:
             params_dict = None
             if params:
-                params_dict = {str(key): str(value) for key, value in params.items()}
+                params_dict = {
+                    str(key): str(value)
+                    for key, value in params.items()
+                    if value is not None
+                }
             json_dict = dict(json) if json else None
             response = self._session.request(
                 method,
@@ -474,9 +510,22 @@ class SlackDumpAndReset:
     def _parse_parameters(self, payload: Mapping[str, object]) -> SlackDumpParameters:
         parameters_raw = payload["parameters"]
         assert isinstance(parameters_raw, Mapping)
-        token = parameters_raw.get("slack_token")
+        token_obj = parameters_raw.get("slack_token")
+        token = token_obj if isinstance(token_obj, str) and token_obj else None
         if token is None:
-            token = os.getenv("SLACK_TOKEN")
+            env_value = os.getenv("SLACK_TOKEN")
+            if isinstance(env_value, str) and env_value.strip():
+                candidate = env_value.strip()
+                if is_valid_slack_access_token(candidate):
+                    token = candidate
+        if token is None:
+            persisted_token, _ = _resolve_persistent_slack_token()
+            if persisted_token:
+                token = persisted_token
+        elif not is_valid_slack_access_token(token):
+            persisted_token, _ = _resolve_persistent_slack_token()
+            if persisted_token and is_valid_slack_access_token(persisted_token):
+                token = persisted_token
         if not isinstance(token, str) or not token:
             raise RuntimeError("Slack token not provided in payload or SLACK_TOKEN environment variable")
         archive_root_raw = parameters_raw.get("archive_root")
@@ -582,6 +631,34 @@ def _dump_json(output: Mapping[str, object]) -> None:
     sys.stdout.write("\n")
 
 
+def _prompt_delete_confirmation(payload: Mapping[str, object]) -> None:
+    parameters_obj = payload.get("parameters")
+    if not isinstance(parameters_obj, dict):
+        return
+    delete_after = parameters_obj.get("delete_after_export")
+    delete_enabled = True if delete_after is None else bool(delete_after)
+    if not delete_enabled:
+        return
+    if bool(parameters_obj.get("dry_run", False)):
+        return
+
+    while True:
+        response = input(
+            "Archive captured. Delete Slack messages and files after export? [y/N]: "
+        ).strip().lower()
+        if response in {"y", "yes"}:
+            print("Confirmed. Slack source will be purged post-export.", file=sys.stderr)
+            return
+        if response in {"", "n", "no"}:
+            parameters_obj["delete_after_export"] = False
+            print(
+                "Deletion skipped. Slack history remains intact for aggregation.",
+                file=sys.stderr,
+            )
+            return
+        print("Please respond with 'y' or 'n'.", file=sys.stderr)
+
+
 def _run_cli() -> int:
     parser = argparse.ArgumentParser(
         prog="x_make_slack_dump_and_reset_z",
@@ -593,6 +670,7 @@ def _run_cli() -> int:
 
     try:
         payload = _load_json_source(args.input)
+        _prompt_delete_confirmation(payload)
         runner = SlackDumpAndReset()
         output = runner.run(payload)
     except Exception as exc:
