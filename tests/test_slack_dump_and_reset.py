@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import cast
 
-import x_make_slack_dump_and_reset_z.x_cls_make_slack_dump_and_reset_x as module
 from x_make_slack_dump_and_reset_z.x_cls_make_slack_dump_and_reset_x import (
     SCHEMA_VERSION,
     SlackChannelContext,
@@ -15,6 +15,11 @@ from x_make_slack_dump_and_reset_z.x_cls_make_slack_dump_and_reset_x import (
     SlackFileRecord,
     SlackMessageRecord,
 )
+
+
+def expect(*, condition: bool, message: str) -> None:
+    if not condition:
+        raise AssertionError(message)
 
 
 class FakeSlackClient(SlackClientProtocol):
@@ -35,6 +40,7 @@ class FakeSlackClient(SlackClientProtocol):
         *,
         include_threads: bool,
     ) -> list[SlackMessageRecord]:
+        _ = channel_id
         record = SlackMessageRecord(
             ts="123.456",
             text="Hello world",
@@ -66,18 +72,28 @@ class FakeSlackClient(SlackClientProtocol):
         self.deleted_files.append(file_id)
 
 
-def _make_runner(fake_client: FakeSlackClient) -> SlackDumpAndReset:
+def _make_runner(
+    fake_client: FakeSlackClient,
+    *,
+    resolver: Callable[[], tuple[str | None, bool]] | None = None,
+) -> SlackDumpAndReset:
+    if resolver is None:
+        return SlackDumpAndReset(
+            client_factory=lambda _token: fake_client,
+            time_provider=lambda: datetime(2025, 10, 26, tzinfo=UTC),
+        )
     return SlackDumpAndReset(
-        client_factory=lambda token: fake_client,
+        client_factory=lambda _token: fake_client,
         time_provider=lambda: datetime(2025, 10, 26, tzinfo=UTC),
+        persistent_token_resolver=resolver,
     )
 
 
-def _build_payload(archive_root: Path) -> dict[str, Any]:
+def _build_payload(archive_root: Path) -> dict[str, object]:
     return {
         "command": "x_make_slack_dump_and_reset_x",
         "parameters": {
-            "slack_token": "xoxb-test",
+            "slack_token": "slack-token",
             "channels": ["general"],
             "archive_root": str(archive_root),
         },
@@ -103,33 +119,82 @@ def test_run_exports_messages_and_deletes(tmp_path: Path) -> None:
     payload = _build_payload(change_control)
     result = runner.run(payload)
 
-    assert result["status"] == "success"
-    assert result["schema_version"] == SCHEMA_VERSION
-    channels = result["channels"]
-    assert isinstance(channels, list)
-    assert channels
-    channel_result = channels[0]
-    assert isinstance(channel_result, dict)
-    assert channel_result["channel_name"] == "general"
-    assert channel_result["deleted"] is True
-    assert channel_result["file_count"] == 1
-    export_path = Path(channel_result["export_path"])
-    assert export_path.exists()
+    expect(
+        condition=result["status"] == "success",
+        message="Run should mark status as success",
+    )
+    expect(
+        condition=result["schema_version"] == SCHEMA_VERSION,
+        message="Schema version should match contract",
+    )
+    channels_obj = result["channels"]
+    if not isinstance(channels_obj, list):
+        raise AssertionError("channels must be a list")
+    expect(condition=bool(channels_obj), message="channels result should not be empty")
+    channel_mapping_raw = channels_obj[0]
+    if not isinstance(channel_mapping_raw, Mapping):
+        raise AssertionError("channel entry must be mapping")
+    channel_mapping = cast("Mapping[str, object]", channel_mapping_raw)
+    channel_data = dict(channel_mapping)
+    expect(
+        condition=channel_data.get("channel_name") == "general",
+        message="Channel name should be general",
+    )
+    expect(
+        condition=channel_data.get("deleted") is True,
+        message="Channel should be marked deleted",
+    )
+    expect(
+        condition=channel_data.get("file_count") == 1,
+        message="File count should reflect exported files",
+    )
+    export_path_value = channel_data.get("export_path")
+    if not isinstance(export_path_value, str):
+        raise AssertionError("export_path must be string")
+    export_path = Path(export_path_value)
+    expect(
+        condition=export_path.exists(),
+        message="Export directory should exist",
+    )
     messages_file = export_path / "messages.json"
-    assert messages_file.exists()
-    messages = json.loads(messages_file.read_text(encoding="utf-8"))
-    assert isinstance(messages, list)
-    assert messages[0]["text"] == "Hello world"
-    assert fake_client.downloaded
-    assert fake_client.deleted_messages
-    assert "F123" in fake_client.deleted_files
+    expect(
+        condition=messages_file.exists(),
+        message="messages.json should be written",
+    )
+    messages_raw: object = json.loads(messages_file.read_text(encoding="utf-8"))
+    if not isinstance(messages_raw, list):
+        raise AssertionError("Messages must be list")
+    expect(condition=bool(messages_raw), message="Messages list should not be empty")
+    first_message_raw = messages_raw[0]
+    if not isinstance(first_message_raw, Mapping):
+        raise AssertionError("Message must be mapping")
+    first_message = dict(cast("Mapping[str, object]", first_message_raw))
+    expect(
+        condition=first_message.get("text") == "Hello world",
+        message="Expected message text not found",
+    )
+    expect(
+        condition=bool(fake_client.downloaded),
+        message="Files should be downloaded",
+    )
+    expect(
+        condition=bool(fake_client.deleted_messages),
+        message="Messages should be deleted",
+    )
+    expect(
+        condition="F123" in fake_client.deleted_files,
+        message="File deletion should include F123",
+    )
 
 
 def test_run_uses_persistent_token_when_payload_missing(tmp_path: Path) -> None:
     change_control = tmp_path / "Change Control"
     _prepare_archive_root(change_control)
     fake_client = FakeSlackClient()
-    runner = _make_runner(fake_client)
+    runner = _make_runner(
+        fake_client,
+        resolver=lambda: ("vault-token", True),
+    )
 
     payload = {
         "command": "x_make_slack_dump_and_reset_x",
@@ -140,16 +205,16 @@ def test_run_uses_persistent_token_when_payload_missing(tmp_path: Path) -> None:
     }
 
     original_env = os.environ.get("SLACK_TOKEN")
-    os.environ["SLACK_TOKEN"] = "xoxe-ignored-refresh-token"
-    original_resolver = module._resolve_persistent_slack_token
+    os.environ["SLACK_TOKEN"] = "placeholder-token"
     try:
-        module._resolve_persistent_slack_token = lambda: ("xoxp-from-vault", True)
         result = runner.run(payload)
     finally:
         if original_env is not None:
             os.environ["SLACK_TOKEN"] = original_env
         else:
             os.environ.pop("SLACK_TOKEN", None)
-    module._resolve_persistent_slack_token = original_resolver
 
-    assert result["status"] == "success"
+    expect(
+        condition=result["status"] == "success",
+        message="Persistent token should allow successful run",
+    )

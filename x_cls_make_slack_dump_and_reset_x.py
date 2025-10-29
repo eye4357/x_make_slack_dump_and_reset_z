@@ -10,6 +10,7 @@ import os
 import sys
 import time
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +25,11 @@ from x_make_slack_dump_and_reset_z.json_contracts import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+HTTP_TOO_MANY_REQUESTS = 429
+JSON_KEY_ERROR_MESSAGE = "JSON object keys must be strings"
+JSON_OBJECT_REQUIRED_MESSAGE = "Expected JSON object"
+UNSUPPORTED_JSON_VALUE_MESSAGE = "Unsupported JSON value encountered"
 
 
 JSONPrimitive: TypeAlias = str | int | float | bool | None
@@ -40,19 +46,19 @@ def _coerce_json_value(value: object) -> JSONValue:
         result: dict[str, JSONValue] = {}
         for key, inner in value.items():
             if not isinstance(key, str):
-                raise TypeError("JSON object keys must be strings")
+                raise TypeError(JSON_KEY_ERROR_MESSAGE)
             result[key] = _coerce_json_value(inner)
         return result
-    raise TypeError("Unsupported JSON value encountered")
+    raise TypeError(UNSUPPORTED_JSON_VALUE_MESSAGE)
 
 
 def _coerce_json_object(value: object) -> JSONObject:
     if not isinstance(value, dict):
-        raise TypeError("Expected JSON object")
+        raise TypeError(JSON_OBJECT_REQUIRED_MESSAGE)
     result: JSONObject = {}
     for key, inner in value.items():
         if not isinstance(key, str):
-            raise TypeError("JSON object keys must be strings")
+            raise TypeError(JSON_KEY_ERROR_MESSAGE)
         result[key] = _coerce_json_value(inner)
     return result
 
@@ -90,17 +96,48 @@ class SessionProtocol(Protocol):
 
 
 class RequestsModule(Protocol):
-    def Session(self) -> SessionProtocol: ...
+    Session: Callable[[], SessionProtocol]
+
+
+class PersistentEnvReaderProtocol(Protocol):
+    def get_user_env(self) -> str | None: ...
+
+
+class PersistentEnvReaderFactoryProtocol(Protocol):
+    def __call__(
+        self,
+        var: str = "",
+        value: str = "",
+        *,
+        quiet: bool = False,
+        ctx: object | None = None,
+        **token_options: object,
+    ) -> PersistentEnvReaderProtocol: ...
 
 
 if TYPE_CHECKING:
     requests: RequestsModule
+    from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (  # type: ignore import-not-found
+        x_cls_make_persistent_env_var_x as ImportedPersistentEnvFactory,
+    )
+    PersistentEnvReaderFactory: PersistentEnvReaderFactoryProtocol | None = (
+        cast("PersistentEnvReaderFactoryProtocol", ImportedPersistentEnvFactory)
+    )
 else:  # pragma: no cover - import guard for runtime dependency
     try:
         requests = cast("RequestsModule", importlib.import_module("requests"))
     except ModuleNotFoundError as exc:  # pragma: no cover - surfaced at runtime
         message = "The 'requests' package is required for Slack exports"
         raise RuntimeError(message) from exc
+    try:
+        from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (
+            x_cls_make_persistent_env_var_x as ImportedPersistentEnvFactory,
+        )
+        PersistentEnvReaderFactory = cast(
+            "PersistentEnvReaderFactoryProtocol", ImportedPersistentEnvFactory
+        )
+    except ImportError:  # pragma: no cover - optional dependency resolved at runtime
+        PersistentEnvReaderFactory = None
 
 SCHEMA_VERSION = "x_make_slack_dump_and_reset_x.run/1.0"
 DEFAULT_EXPORT_SUBDIR = "slack_exports"
@@ -206,20 +243,17 @@ def is_valid_slack_access_token(token: str) -> bool:
 def _resolve_persistent_slack_token() -> tuple[str | None, bool]:
     """Return a Slack token from the persistent vault when available."""
 
-    try:
-        from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (
-            x_cls_make_persistent_env_var_x,
-        )
-    except Exception:  # pragma: no cover - optional dependency at runtime
+    if PersistentEnvReaderFactory is None:
         return None, False
 
-    try:
-        reader = x_cls_make_persistent_env_var_x("SLACK_TOKEN", quiet=True)
+    reader = PersistentEnvReaderFactory("SLACK_TOKEN", quiet=True)
+    persisted: str | None = None
+    with suppress(Exception):
         persisted = reader.get_user_env()
-    except Exception:
-        return None, False
-    if isinstance(persisted, str) and persisted.strip():
-        return persisted.strip(), True
+    if isinstance(persisted, str):
+        candidate = persisted.strip()
+        if candidate:
+            return candidate, True
     return None, False
 
 
@@ -273,15 +307,17 @@ class SlackWebClient:
             )
             raw_messages = payload.get("messages", [])
             if not isinstance(raw_messages, list):
-                raise SlackAPIError(
-                    "conversations.history", "invalid_messages_payload", payload
-                )
+                method = "conversations.history"
+                error = "invalid_messages_payload"
+                raise SlackAPIError(method, error, payload)
             for raw in raw_messages:
                 message_obj = _maybe_json_object(raw)
                 if message_obj is None:
                     continue
                 record = self._build_message_record(
-                    channel_id, message_obj, include_threads
+                    channel_id,
+                    message_obj,
+                    include_threads=include_threads,
                 )
                 messages.append(record)
             cursor = self._next_cursor(payload)
@@ -292,11 +328,10 @@ class SlackWebClient:
     def download_file(self, file_record: SlackFileRecord, destination: Path) -> Path:
         destination.mkdir(parents=True, exist_ok=True)
         if not file_record.download_url:
-            raise SlackAPIError(
-                "files.download",
-                "missing_download_url",
-                {"file": file_record.file_id},
-            )
+            method = "files.download"
+            error = "missing_download_url"
+            details = {"file": file_record.file_id}
+            raise SlackAPIError(method, error, details)
         response = self._http_request("GET", file_record.download_url, stream=True)
         target_path = destination / Path(file_record.name).name
         with target_path.open("wb") as handle:
@@ -333,11 +368,12 @@ class SlackWebClient:
             name = str(payload.get("name", channel_id))
             self._channel_cache[channel_id] = payload
             self._channel_name_to_id[name] = channel_id
-            if channel_id == identifier or name == identifier:
+            if identifier in {channel_id, name}:
                 return payload
-        raise SlackAPIError(
-            "conversations.list", "channel_not_found", {"query": identifier}
-        )
+        method = "conversations.list"
+        error = "channel_not_found"
+        details = {"query": identifier}
+        raise SlackAPIError(method, error, details)
 
     def _iterate_channels(self) -> Iterable[JSONObject]:
         cursor: str | None = None
@@ -348,9 +384,9 @@ class SlackWebClient:
             )
             channels = payload.get("channels", [])
             if not isinstance(channels, list):
-                raise SlackAPIError(
-                    "conversations.list", "invalid_channels_payload", payload
-                )
+                method = "conversations.list"
+                error = "invalid_channels_payload"
+                raise SlackAPIError(method, error, payload)
             for channel in channels:
                 channel_obj = _maybe_json_object(channel)
                 if channel_obj is not None:
@@ -363,6 +399,7 @@ class SlackWebClient:
         self,
         channel_id: str,
         raw: JSONObject,
+        *,
         include_threads: bool,
     ) -> SlackMessageRecord:
         text = str(raw.get("text", ""))
@@ -441,7 +478,8 @@ class SlackWebClient:
         payload_raw = response.json()
         payload = _maybe_json_object(payload_raw)
         if payload is None:
-            raise SlackAPIError(method, "invalid_payload", {})
+            error = "invalid_payload"
+            raise SlackAPIError(method, error, {})
         ok_value = payload.get("ok")
         is_ok = bool(ok_value) if isinstance(ok_value, bool) else False
         if not is_ok:
@@ -475,7 +513,7 @@ class SlackWebClient:
                 json=json_dict,
                 stream=stream,
             )
-            if response.status_code == 429:
+            if response.status_code == HTTP_TOO_MANY_REQUESTS:
                 retry_after = response.headers.get("Retry-After")
                 sleep_for = float(retry_after) if retry_after else backoff
                 LOGGER.debug("Slack rate limit hit; sleeping for %s seconds", sleep_for)
@@ -516,169 +554,334 @@ class SlackDumpAndReset:
         client_factory: Callable[[str], SlackClientProtocol] | None = None,
         *,
         time_provider: Callable[[], datetime] = _now_utc,
+        persistent_token_resolver: Callable[[], tuple[str | None, bool]] = (
+            _resolve_persistent_slack_token
+        ),
     ) -> None:
         self._client_factory = client_factory
         self._time_provider = time_provider
+        self._persistent_token_resolver = persistent_token_resolver
 
     def run(self, payload: Mapping[str, object]) -> dict[str, object]:
         validate_payload(payload, INPUT_SCHEMA)
         parameters = self._parse_parameters(payload)
-        export_root = self._resolve_export_root(parameters.archive_root)
+        export_folder = self._prepare_export_folder(parameters.archive_root)
+        client = self._create_client(parameters.slack_token)
+        channel_results, info_messages = self._process_channels(
+            client, parameters, export_folder
+        )
+        output = self._build_output(
+            export_folder, channel_results, info_messages, parameters.notes
+        )
+        validate_payload(output, OUTPUT_SCHEMA)
+        return output
+
+    def _prepare_export_folder(self, archive_root: Path) -> Path:
+        export_root = self._resolve_export_root(archive_root)
         timestamp = self._time_provider().strftime("%Y%m%dT%H%M%SZ")
         export_folder = export_root / DEFAULT_EXPORT_SUBDIR / timestamp
         export_folder.mkdir(parents=True, exist_ok=True)
+        return export_folder
 
-        client = self._create_client(parameters.slack_token)
-
+    def _process_channels(
+        self,
+        client: SlackClientProtocol,
+        parameters: SlackDumpParameters,
+        export_folder: Path,
+    ) -> tuple[list[dict[str, object]], list[str]]:
         results: list[dict[str, object]] = []
         info_messages: list[str] = []
-
-        normalised_channels = [
-            self._normalise_channel_identifier(channel_spec)
-            for channel_spec in parameters.channels
-        ]
-
+        normalised_channels = self._normalise_channels(parameters.channels)
         for channel_identifier, label in normalised_channels:
-            if (
-                channel_identifier in parameters.skip_channels
-                or label in parameters.skip_channels
+            if self._should_skip_channel(
+                channel_identifier, label, parameters.skip_channels
             ):
-                info_messages.append(f"Skipped channel {label} via configuration")
+                message = f"Skipped channel {label} via configuration"
+                info_messages.append(message)
                 continue
-            context = client.resolve_channel(channel_identifier)
-            messages = client.fetch_messages(
-                context.channel_id, include_threads=parameters.include_threads
+            channel_result, channel_messages = self._export_channel(
+                client,
+                channel_identifier,
+                export_folder,
+                parameters,
             )
-            context.messages = messages
-            channel_dir = export_folder / context.channel_name
-            channel_dir.mkdir(parents=True, exist_ok=True)
-            message_path = channel_dir / "messages.json"
-            with message_path.open("w", encoding="utf-8") as handle:
-                json.dump(
-                    [self._serialise_message(record) for record in context.messages],
-                    handle,
-                    indent=2,
-                    ensure_ascii=False,
-                )
-            files_dir = channel_dir / "files"
-            expected_files = sum(len(message.files) for message in context.messages)
-            downloaded_files = 0
-            if parameters.include_files and expected_files:
-                for message in context.messages:
-                    for file_record in message.files:
-                        if parameters.dry_run:
-                            downloaded_files += 1
-                            continue
-                        try:
-                            client.download_file(file_record, files_dir)
-                            downloaded_files += 1
-                        except SlackAPIError as exc:
-                            LOGGER.warning(
-                                "Failed to download file %s: %s",
-                                file_record.file_id,
-                                exc,
-                            )
-                            info_messages.append(
-                                f"File download failed for {file_record.file_id} in {context.channel_name}: {exc.error}"
-                            )
-            deleted = False
-            delete_failures = False
-            if parameters.delete_after_export and not parameters.dry_run:
-                for message in context.messages:
-                    try:
-                        client.delete_message(context.channel_id, message.ts)
-                        for reply in message.replies:
-                            reply_ts = str(reply.get("ts", ""))
-                            if reply_ts:
-                                client.delete_message(context.channel_id, reply_ts)
-                        for file_record in message.files:
-                            try:
-                                client.delete_file(file_record.file_id)
-                            except SlackAPIError as exc:
-                                LOGGER.debug(
-                                    "Failed to delete file %s: %s",
-                                    file_record.file_id,
-                                    exc,
-                                )
-                                info_messages.append(
-                                    f"File delete failed for {file_record.file_id} in {context.channel_name}: {exc.error}"
-                                )
-                                delete_failures = True
-                    except SlackAPIError as exc:
-                        LOGGER.warning(
-                            "Failed to delete message %s in channel %s: %s",
-                            message.ts,
-                            context.channel_name,
-                            exc,
-                        )
-                        info_messages.append(
-                            f"Message delete failed for channel {context.channel_name} ts={message.ts}: {exc.error}"
-                        )
-                        delete_failures = True
-                deleted = not delete_failures
-            results.append(
-                {
-                    "channel_id": context.channel_id,
-                    "channel_name": context.channel_name,
-                    "message_count": sum(
-                        1 + len(msg.replies) for msg in context.messages
-                    ),
-                    "file_count": (
-                        downloaded_files if parameters.include_files else expected_files
-                    ),
-                    "export_path": str(channel_dir.as_posix()),
-                    "deleted": deleted,
-                }
+            results.append(channel_result)
+            info_messages.extend(channel_messages)
+        return results, info_messages
+
+    def _normalise_channels(
+        self, channels: Sequence[str | Mapping[str, object]]
+    ) -> list[tuple[str, str]]:
+        normalised: list[tuple[str, str]] = []
+        for channel_spec in channels:
+            normalised.append(self._normalise_channel_identifier(channel_spec))
+        return normalised
+
+    def _export_channel(
+        self,
+        client: SlackClientProtocol,
+        channel_identifier: str,
+        export_folder: Path,
+        parameters: SlackDumpParameters,
+    ) -> tuple[dict[str, object], list[str]]:
+        context = client.resolve_channel(channel_identifier)
+        messages = client.fetch_messages(
+            context.channel_id, include_threads=parameters.include_threads
+        )
+        context.messages = messages
+        channel_dir = export_folder / context.channel_name
+        channel_dir.mkdir(parents=True, exist_ok=True)
+        self._write_messages_file(channel_dir, context.messages)
+        expected_files = sum(len(message.files) for message in context.messages)
+        downloaded_files, download_messages = self._download_channel_files(
+            client,
+            context,
+            channel_dir,
+            expected_files,
+            parameters.include_files,
+            parameters.dry_run,
+        )
+        deleted, delete_messages = self._maybe_delete_history(
+            client,
+            context,
+            parameters.delete_after_export,
+            parameters.dry_run,
+        )
+        channel_messages = [*download_messages, *delete_messages]
+        message_count = sum(1 + len(msg.replies) for msg in context.messages)
+        file_count = downloaded_files if parameters.include_files else expected_files
+        result = {
+            "channel_id": context.channel_id,
+            "channel_name": context.channel_name,
+            "message_count": message_count,
+            "file_count": file_count,
+            "export_path": channel_dir.as_posix(),
+            "deleted": deleted,
+        }
+        return result, channel_messages
+
+    @staticmethod
+    def _should_skip_channel(
+        channel_identifier: str, label: str, skip_channels: set[str]
+    ) -> bool:
+        return channel_identifier in skip_channels or label in skip_channels
+
+    def _write_messages_file(
+        self, channel_dir: Path, messages: Sequence[SlackMessageRecord]
+    ) -> None:
+        message_path = channel_dir / "messages.json"
+        with message_path.open("w", encoding="utf-8") as handle:
+            json.dump(
+                [self._serialise_message(record) for record in messages],
+                handle,
+                indent=2,
+                ensure_ascii=False,
             )
 
+    def _download_channel_files(
+        self,
+        client: SlackClientProtocol,
+        context: SlackChannelContext,
+        channel_dir: Path,
+        expected_files: int,
+        include_files: bool,
+        dry_run: bool,
+    ) -> tuple[int, list[str]]:
+        info_messages: list[str] = []
+        downloaded_files = 0
+        if not include_files or expected_files == 0:
+            return downloaded_files, info_messages
+        files_dir = channel_dir / "files"
+        for message in context.messages:
+            for file_record in message.files:
+                if dry_run:
+                    downloaded_files += 1
+                    continue
+                try:
+                    client.download_file(file_record, files_dir)
+                    downloaded_files += 1
+                except SlackAPIError as exc:
+                    LOGGER.warning(
+                        "Failed to download file %s: %s",
+                        file_record.file_id,
+                        exc,
+                    )
+                    error_message = (
+                        "File download failed for "
+                        f"{file_record.file_id} in {context.channel_name}: {exc.error}"
+                    )
+                    info_messages.append(error_message)
+        return downloaded_files, info_messages
+
+    def _maybe_delete_history(
+        self,
+        client: SlackClientProtocol,
+        context: SlackChannelContext,
+        delete_after_export: bool,
+        dry_run: bool,
+    ) -> tuple[bool, list[str]]:
+        info_messages: list[str] = []
+        if not delete_after_export or dry_run:
+            return False, info_messages
+        delete_failures = False
+        for message in context.messages:
+            message_failed, message_info = self._delete_message_and_files(
+                client, context, message
+            )
+            info_messages.extend(message_info)
+            if message_failed:
+                delete_failures = True
+        return (not delete_failures), info_messages
+
+    def _delete_message_and_files(
+        self,
+        client: SlackClientProtocol,
+        context: SlackChannelContext,
+        message: SlackMessageRecord,
+    ) -> tuple[bool, list[str]]:
+        info_messages: list[str] = []
+        try:
+            client.delete_message(context.channel_id, message.ts)
+            for reply in message.replies:
+                reply_ts = str(reply.get("ts", ""))
+                if reply_ts:
+                    client.delete_message(context.channel_id, reply_ts)
+        except SlackAPIError as exc:
+            LOGGER.warning(
+                "Failed to delete message %s in channel %s: %s",
+                message.ts,
+                context.channel_name,
+                exc,
+            )
+            failure_message = (
+                "Message delete failed for channel "
+                f"{context.channel_name} ts={message.ts}: {exc.error}"
+            )
+            info_messages.append(failure_message)
+            return True, info_messages
+
+        message_failed = False
+        for file_record in message.files:
+            try:
+                client.delete_file(file_record.file_id)
+            except SlackAPIError as exc:
+                LOGGER.debug(
+                    "Failed to delete file %s: %s",
+                    file_record.file_id,
+                    exc,
+                )
+                error_message = (
+                    "File delete failed for "
+                    f"{file_record.file_id} in {context.channel_name}: {exc.error}"
+                )
+                info_messages.append(error_message)
+                message_failed = True
+        return message_failed, info_messages
+
+    def _build_output(
+        self,
+        export_folder: Path,
+        results: Sequence[dict[str, object]],
+        info_messages: Sequence[str],
+        notes: Sequence[str],
+    ) -> dict[str, object]:
         output: dict[str, object] = {
             "status": "success",
             "schema_version": SCHEMA_VERSION,
             "export_root": export_folder.as_posix(),
-            "channels": results,
+            "channels": list(results),
         }
-        if info_messages or parameters.notes:
-            combined_messages: list[str] = list(parameters.notes)
-            combined_messages.extend(info_messages)
+        if info_messages or notes:
+            combined_messages = [*notes, *info_messages]
             output["messages"] = combined_messages
-        validate_payload(output, OUTPUT_SCHEMA)
         return output
 
     def _create_client(self, token: str) -> SlackClientProtocol:
-        factory = self._client_factory or (lambda t: SlackWebClient(t))
+        if self._client_factory is not None:
+            factory = self._client_factory
+        else:
+            factory = cast("Callable[[str], SlackClientProtocol]", SlackWebClient)
         return factory(token)
 
     def _parse_parameters(self, payload: Mapping[str, object]) -> SlackDumpParameters:
-        parameters_raw = payload["parameters"]
-        assert isinstance(parameters_raw, Mapping)
-        token_obj = parameters_raw.get("slack_token")
-        token = token_obj if isinstance(token_obj, str) and token_obj else None
-        if token is None:
-            env_value = os.getenv("SLACK_TOKEN")
-            if isinstance(env_value, str) and env_value.strip():
-                candidate = env_value.strip()
-                if is_valid_slack_access_token(candidate):
-                    token = candidate
-        if token is None:
-            persisted_token, _ = _resolve_persistent_slack_token()
-            if persisted_token:
-                token = persisted_token
-        elif not is_valid_slack_access_token(token):
-            persisted_token, _ = _resolve_persistent_slack_token()
-            if persisted_token and is_valid_slack_access_token(persisted_token):
-                token = persisted_token
-        if not isinstance(token, str) or not token:
-            message = (
-                "Slack token not provided in payload or SLACK_TOKEN environment "
-                "variable"
-            )
-            raise RuntimeError(message)
+        parameters_raw = self._extract_parameters(payload)
+        token = self._resolve_token(parameters_raw)
+        archive_root = self._parse_archive_root(parameters_raw)
+        channels = self._parse_channels(parameters_raw)
+        skip_channels = self._parse_skip_channels(parameters_raw)
+        delete_after_export = self._coerce_bool_option(
+            parameters_raw, "delete_after_export", True
+        )
+        include_files = self._coerce_bool_option(
+            parameters_raw, "include_files", True
+        )
+        include_threads = self._coerce_bool_option(
+            parameters_raw, "include_threads", True
+        )
+        dry_run = self._coerce_bool_option(parameters_raw, "dry_run", False)
+        notes = self._parse_notes(parameters_raw)
+        return SlackDumpParameters(
+            slack_token=token,
+            channels=channels,
+            archive_root=archive_root,
+            delete_after_export=delete_after_export,
+            include_files=include_files,
+            include_threads=include_threads,
+            dry_run=dry_run,
+            skip_channels=skip_channels,
+            notes=notes,
+        )
+
+    @staticmethod
+    def _extract_parameters(payload: Mapping[str, object]) -> Mapping[str, object]:
+        parameters_obj = payload.get("parameters")
+        if isinstance(parameters_obj, Mapping):
+            return parameters_obj
+        message = "Payload must include a 'parameters' mapping"
+        raise RuntimeError(message)
+
+    def _resolve_token(self, parameters_raw: Mapping[str, object]) -> str:
+        token_candidate = parameters_raw.get("slack_token")
+        token = (
+            token_candidate.strip()
+            if isinstance(token_candidate, str) and token_candidate.strip()
+            else None
+        )
+        if token and is_valid_slack_access_token(token):
+            return token
+        env_value = os.getenv("SLACK_TOKEN")
+        env_token = (
+            env_value.strip() if isinstance(env_value, str) and env_value.strip() else None
+        )
+        if env_token and is_valid_slack_access_token(env_token):
+            return env_token
+        persisted_token, _ = self._persistent_token_resolver()
+        if persisted_token and is_valid_slack_access_token(persisted_token):
+            return persisted_token
+        message = (
+            "Slack token not provided in payload or SLACK_TOKEN environment "
+            "variable"
+        )
+        raise RuntimeError(message)
+
+    @staticmethod
+    def _parse_archive_root(parameters_raw: Mapping[str, object]) -> Path:
         archive_root_raw = parameters_raw.get("archive_root")
-        if not isinstance(archive_root_raw, str) or not archive_root_raw:
+        if not isinstance(archive_root_raw, str) or not archive_root_raw.strip():
             message = "archive_root must be a non-empty string path"
             raise RuntimeError(message)
+        return Path(archive_root_raw).expanduser().resolve()
+
+    @staticmethod
+    def _parse_channels(
+        parameters_raw: Mapping[str, object]
+    ) -> list[str | Mapping[str, object]]:
         channels_raw = parameters_raw.get("channels")
-        if not isinstance(channels_raw, Sequence) or not channels_raw:
+        if (
+            not isinstance(channels_raw, Sequence)
+            or isinstance(channels_raw, (str, bytes))
+            or not channels_raw
+        ):
             message = "channels must be a non-empty array"
             raise RuntimeError(message)
         channels: list[str | Mapping[str, object]] = []
@@ -688,44 +891,52 @@ class SlackDumpAndReset:
             else:
                 message = "channels entries must be strings or objects with id/name"
                 raise RuntimeError(message)
+        return channels
+
+    @staticmethod
+    def _parse_skip_channels(parameters_raw: Mapping[str, object]) -> set[str]:
         skip_raw = parameters_raw.get("skip_channels")
-        skip_channels: set[str] = set()
-        if isinstance(skip_raw, Sequence):
-            for item in skip_raw:
-                if isinstance(item, str) and item:
-                    skip_channels.add(item)
-        delete_after_export = bool(parameters_raw.get("delete_after_export", True))
-        include_files = bool(parameters_raw.get("include_files", True))
-        include_threads = bool(parameters_raw.get("include_threads", True))
-        dry_run = bool(parameters_raw.get("dry_run", False))
+        if not isinstance(skip_raw, Sequence) or isinstance(skip_raw, (str, bytes)):
+            return set()
+        return {item for item in skip_raw if isinstance(item, str) and item}
+
+    @staticmethod
+    def _coerce_bool_option(
+        parameters_raw: Mapping[str, object], key: str, default: bool
+    ) -> bool:
+        value = parameters_raw.get(key)
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalised = value.strip().lower()
+            if normalised in {"true", "1", "yes"}:
+                return True
+            if normalised in {"false", "0", "no"}:
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return bool(value)
+
+    @staticmethod
+    def _parse_notes(parameters_raw: Mapping[str, object]) -> list[str]:
         notes_raw = parameters_raw.get("notes")
-        notes: list[str] = []
-        if isinstance(notes_raw, Sequence):
-            for note in notes_raw:
-                if isinstance(note, str):
-                    notes.append(note)
-        return SlackDumpParameters(
-            slack_token=token,
-            channels=channels,
-            archive_root=Path(archive_root_raw).expanduser().resolve(),
-            delete_after_export=delete_after_export,
-            include_files=include_files,
-            include_threads=include_threads,
-            dry_run=dry_run,
-            skip_channels=skip_channels,
-            notes=notes,
-        )
+        if not isinstance(notes_raw, Sequence) or isinstance(notes_raw, (str, bytes)):
+            return []
+        return [note for note in notes_raw if isinstance(note, str)]
 
     def _resolve_export_root(self, archive_root: Path) -> Path:
         if not archive_root.exists():
-            raise FileNotFoundError(f"Archive root does not exist: {archive_root}")
+            message = f"Archive root does not exist: {archive_root}"
+            raise FileNotFoundError(message)
         subdirectories = [item for item in archive_root.iterdir() if item.is_dir()]
         if not subdirectories:
-            raise FileNotFoundError(
+            message = (
                 f"Archive root {archive_root} has no subdirectories to target"
             )
-        latest_directory = max(subdirectories, key=lambda item: item.stat().st_mtime)
-        return latest_directory
+            raise FileNotFoundError(message)
+        return max(subdirectories, key=lambda item: item.stat().st_mtime)
 
     @staticmethod
     def _normalise_channel_identifier(
@@ -774,20 +985,29 @@ class SlackDumpAndReset:
 
 
 def _load_json_source(path: str | None) -> Mapping[str, object]:
+    payload_raw: object
     if path is None or path == "-":
-        payload = json.load(sys.stdin)
+        payload_raw = json.load(sys.stdin)
     else:
-        with open(path, encoding="utf-8") as handle:
-            payload = json.load(handle)
-    if not isinstance(payload, Mapping):
+        payload_path = Path(path)
+        with payload_path.open(encoding="utf-8") as handle:
+            payload_raw = json.load(handle)
+    payload = _maybe_json_object(payload_raw)
+    if payload is None:
         message = "Input payload must be a JSON object"
-        raise RuntimeError(message)
+        raise TypeError(message)
     return payload
 
 
 def _dump_json(output: Mapping[str, object]) -> None:
     json.dump(output, sys.stdout, indent=2, ensure_ascii=False)
     sys.stdout.write("\n")
+
+
+def _write_json_to_path(path: Path, payload: Mapping[str, object]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
 
 
 def _prompt_delete_confirmation(payload: Mapping[str, object]) -> None:
@@ -802,13 +1022,11 @@ def _prompt_delete_confirmation(payload: Mapping[str, object]) -> None:
         return
 
     while True:
-        response = (
-            input(
-                "Archive captured. Delete Slack messages and files after export? [y/N]: "
-            )
-            .strip()
-            .lower()
+        prompt = (
+            "Archive captured. Delete Slack messages and files after export?"
+            " [y/N]: "
         )
+        response = input(prompt).strip().lower()
         if response in {"y", "yes"}:
             print(
                 "Confirmed. Slack source will be purged post-export.", file=sys.stderr
@@ -847,22 +1065,16 @@ def _run_cli() -> int:
             "message": str(exc),
             "details": {"type": exc.__class__.__name__},
         }
-        try:
+        with suppress(Exception):
             validate_payload(error_payload, ERROR_SCHEMA)
-        except Exception:  # noqa: BLE001 - best effort to preserve error output
-            pass
         if args.output:
-            with open(args.output, "w", encoding="utf-8") as handle:
-                json.dump(error_payload, handle, indent=2, ensure_ascii=False)
-                handle.write("\n")
+            _write_json_to_path(Path(args.output), error_payload)
         else:
             _dump_json(error_payload)
         return 1
 
     if args.output:
-        with open(args.output, "w", encoding="utf-8") as handle:
-            json.dump(output, handle, indent=2, ensure_ascii=False)
-            handle.write("\n")
+        _write_json_to_path(Path(args.output), output)
     else:
         _dump_json(output)
     return 0
