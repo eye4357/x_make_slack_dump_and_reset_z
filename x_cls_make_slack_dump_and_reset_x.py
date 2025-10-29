@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequenc
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, TypeAlias, cast
 
 from x_make_common_x.json_contracts import validate_payload
 
@@ -26,11 +26,49 @@ from x_make_slack_dump_and_reset_z.json_contracts import (
 LOGGER = logging.getLogger(__name__)
 
 
+JSONPrimitive: TypeAlias = str | int | float | bool | None
+JSONValue: TypeAlias = JSONPrimitive | list["JSONValue"] | dict[str, "JSONValue"]
+JSONObject: TypeAlias = dict[str, JSONValue]
+
+
+def _coerce_json_value(value: object) -> JSONValue:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_coerce_json_value(item) for item in value]
+    if isinstance(value, dict):
+        result: dict[str, JSONValue] = {}
+        for key, inner in value.items():
+            if not isinstance(key, str):
+                raise TypeError("JSON object keys must be strings")
+            result[key] = _coerce_json_value(inner)
+        return result
+    raise TypeError("Unsupported JSON value encountered")
+
+
+def _coerce_json_object(value: object) -> JSONObject:
+    if not isinstance(value, dict):
+        raise TypeError("Expected JSON object")
+    result: JSONObject = {}
+    for key, inner in value.items():
+        if not isinstance(key, str):
+            raise TypeError("JSON object keys must be strings")
+        result[key] = _coerce_json_value(inner)
+    return result
+
+
+def _maybe_json_object(value: object) -> JSONObject | None:
+    try:
+        return _coerce_json_object(value)
+    except TypeError:
+        return None
+
+
 class ResponseProtocol(Protocol):
     status_code: int
     headers: Mapping[str, str]
 
-    def json(self) -> Any: ...
+    def json(self) -> JSONValue: ...
 
     def iter_content(self, chunk_size: int) -> Iterable[bytes]: ...
 
@@ -111,9 +149,9 @@ class SlackMessageRecord:
     ts: str
     text: str
     user: str | None
-    raw: dict[str, Any]
+    raw: JSONObject
     files: list[SlackFileRecord] = field(default_factory=list)
-    replies: list[dict[str, Any]] = field(default_factory=list)
+    replies: list[JSONObject] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -203,7 +241,7 @@ class SlackWebClient:
             }
         )
         self._sleeper = sleeper
-        self._channel_cache: dict[str, dict[str, Any]] = {}
+        self._channel_cache: dict[str, JSONObject] = {}
         self._channel_name_to_id: dict[str, str] = {}
 
     def resolve_channel(self, identifier: str) -> SlackChannelContext:
@@ -215,7 +253,7 @@ class SlackWebClient:
             channel_id=channel_id, channel_name=channel_name, messages=[]
         )
 
-    def iter_channels(self) -> Iterable[dict[str, Any]]:
+    def iter_channels(self) -> Iterable[JSONObject]:
         """Yield channel payloads from the Slack API."""
 
         yield from self._iterate_channels()
@@ -239,9 +277,12 @@ class SlackWebClient:
                     "conversations.history", "invalid_messages_payload", payload
                 )
             for raw in raw_messages:
-                if not isinstance(raw, dict):
+                message_obj = _maybe_json_object(raw)
+                if message_obj is None:
                     continue
-                record = self._build_message_record(channel_id, raw, include_threads)
+                record = self._build_message_record(
+                    channel_id, message_obj, include_threads
+                )
                 messages.append(record)
             cursor = self._next_cursor(payload)
             if not cursor:
@@ -280,7 +321,7 @@ class SlackWebClient:
 
     # --- internal helpers -------------------------------------------------
 
-    def _resolve_channel_payload(self, identifier: str) -> dict[str, Any]:
+    def _resolve_channel_payload(self, identifier: str) -> JSONObject:
         if identifier in self._channel_cache:
             return self._channel_cache[identifier]
         if identifier in self._channel_name_to_id:
@@ -298,7 +339,7 @@ class SlackWebClient:
             "conversations.list", "channel_not_found", {"query": identifier}
         )
 
-    def _iterate_channels(self) -> Iterable[dict[str, Any]]:
+    def _iterate_channels(self) -> Iterable[JSONObject]:
         cursor: str | None = None
         while True:
             payload = self._api_call(
@@ -311,8 +352,9 @@ class SlackWebClient:
                     "conversations.list", "invalid_channels_payload", payload
                 )
             for channel in channels:
-                if isinstance(channel, dict):
-                    yield channel
+                channel_obj = _maybe_json_object(channel)
+                if channel_obj is not None:
+                    yield channel_obj
             cursor = self._next_cursor(payload)
             if not cursor:
                 break
@@ -320,7 +362,7 @@ class SlackWebClient:
     def _build_message_record(
         self,
         channel_id: str,
-        raw: dict[str, Any],
+        raw: JSONObject,
         include_threads: bool,
     ) -> SlackMessageRecord:
         text = str(raw.get("text", ""))
@@ -329,18 +371,30 @@ class SlackWebClient:
         files: list[SlackFileRecord] = []
         if isinstance(files_payload, list):
             for file_item in files_payload:
-                if not isinstance(file_item, dict):
+                file_obj = _maybe_json_object(file_item)
+                if file_obj is None:
                     continue
-                file_id = str(file_item.get("id", ""))
+                file_id = str(file_obj.get("id", ""))
                 if not file_id:
                     continue
+                download_candidate = file_obj.get(
+                    "url_private_download"
+                ) or file_obj.get("url_private")
+                download_url = (
+                    str(download_candidate)
+                    if isinstance(download_candidate, str)
+                    else None
+                )
+                mimetype_obj = file_obj.get("mimetype")
+                mimetype = str(mimetype_obj) if isinstance(mimetype_obj, str) else None
+                size_obj = file_obj.get("size")
+                size = size_obj if isinstance(size_obj, int) else None
                 file_record = SlackFileRecord(
                     file_id=file_id,
-                    name=str(file_item.get("name", file_id)),
-                    download_url=file_item.get("url_private_download")
-                    or file_item.get("url_private"),
-                    mimetype=file_item.get("mimetype"),
-                    size=file_item.get("size"),
+                    name=str(file_obj.get("name", file_id)),
+                    download_url=download_url,
+                    mimetype=mimetype,
+                    size=size,
                 )
                 files.append(file_record)
         record = SlackMessageRecord(
@@ -358,11 +412,12 @@ class SlackWebClient:
             replies = replies_payload.get("messages", [])
             if isinstance(replies, list):
                 for reply in replies:
-                    if not isinstance(reply, dict):
+                    reply_obj = _maybe_json_object(reply)
+                    if reply_obj is None:
                         continue
-                    if reply.get("ts") == record.ts:
+                    if reply_obj.get("ts") == record.ts:
                         continue  # skip parent repeats
-                    record.replies.append(reply)
+                    record.replies.append(reply_obj)
         return record
 
     def _api_call(
@@ -373,7 +428,7 @@ class SlackWebClient:
         json_payload: Mapping[str, object] | None = None,
         http_method: str | None = None,
         **_ignored: object,
-    ) -> dict[str, Any]:
+    ) -> JSONObject:
         params_dict = dict(params) if params else None
         json_dict = dict(json_payload) if json_payload else None
         inferred_method = http_method or ("POST" if json_dict is not None else "GET")
@@ -383,10 +438,13 @@ class SlackWebClient:
             params=params_dict,
             json=json_dict,
         )
-        payload = response.json()
-        if not isinstance(payload, dict):
+        payload_raw = response.json()
+        payload = _maybe_json_object(payload_raw)
+        if payload is None:
             raise SlackAPIError(method, "invalid_payload", {})
-        if not payload.get("ok", False):
+        ok_value = payload.get("ok")
+        is_ok = bool(ok_value) if isinstance(ok_value, bool) else False
+        if not is_ok:
             error_text = str(payload.get("error", "unknown_error"))
             raise SlackAPIError(method, error_text, payload)
         return payload
@@ -428,7 +486,7 @@ class SlackWebClient:
             return response
 
     @staticmethod
-    def _next_cursor(payload: Mapping[str, Any]) -> str | None:
+    def _next_cursor(payload: Mapping[str, JSONValue]) -> str | None:
         metadata = payload.get("response_metadata")
         if isinstance(metadata, Mapping):
             cursor = metadata.get("next_cursor")
@@ -475,8 +533,12 @@ class SlackDumpAndReset:
         results: list[dict[str, object]] = []
         info_messages: list[str] = []
 
-        for channel_spec in parameters.channels:
-            channel_identifier, label = self._normalise_channel_identifier(channel_spec)
+        normalised_channels = [
+            self._normalise_channel_identifier(channel_spec)
+            for channel_spec in parameters.channels
+        ]
+
+        for channel_identifier, label in normalised_channels:
             if (
                 channel_identifier in parameters.skip_channels
                 or label in parameters.skip_channels
@@ -606,23 +668,26 @@ class SlackDumpAndReset:
             if persisted_token and is_valid_slack_access_token(persisted_token):
                 token = persisted_token
         if not isinstance(token, str) or not token:
-            raise RuntimeError(
-                "Slack token not provided in payload or SLACK_TOKEN environment variable"
+            message = (
+                "Slack token not provided in payload or SLACK_TOKEN environment "
+                "variable"
             )
+            raise RuntimeError(message)
         archive_root_raw = parameters_raw.get("archive_root")
         if not isinstance(archive_root_raw, str) or not archive_root_raw:
-            raise RuntimeError("archive_root must be a non-empty string path")
+            message = "archive_root must be a non-empty string path"
+            raise RuntimeError(message)
         channels_raw = parameters_raw.get("channels")
         if not isinstance(channels_raw, Sequence) or not channels_raw:
-            raise RuntimeError("channels must be a non-empty array")
+            message = "channels must be a non-empty array"
+            raise RuntimeError(message)
         channels: list[str | Mapping[str, object]] = []
         for item in channels_raw:
             if (isinstance(item, str) and item) or isinstance(item, Mapping):
                 channels.append(item)
             else:
-                raise RuntimeError(
-                    "channels entries must be strings or objects with id/name"
-                )
+                message = "channels entries must be strings or objects with id/name"
+                raise RuntimeError(message)
         skip_raw = parameters_raw.get("skip_channels")
         skip_channels: set[str] = set()
         if isinstance(skip_raw, Sequence):
@@ -678,16 +743,16 @@ class SlackDumpAndReset:
                 return channel_id, label
             if isinstance(channel_name, str) and channel_name:
                 return channel_name, channel_name
-            raise RuntimeError("Channel mapping must provide 'id' or 'name'")
+            message = "Channel mapping must provide 'id' or 'name'"
+            raise RuntimeError(message)
         if isinstance(channel_spec, str) and channel_spec:
             return channel_spec, channel_spec.lstrip("#")
-        raise RuntimeError(
-            "Channel specification must be a non-empty string or mapping"
-        )
+        message = "Channel specification must be a non-empty string or mapping"
+        raise RuntimeError(message)
 
     @staticmethod
-    def _serialise_message(record: SlackMessageRecord) -> dict[str, Any]:
-        data: dict[str, Any] = {
+    def _serialise_message(record: SlackMessageRecord) -> JSONObject:
+        data: JSONObject = {
             "ts": record.ts,
             "text": record.text,
             "user": record.user,
@@ -704,7 +769,7 @@ class SlackDumpAndReset:
                 for file_record in record.files
             ]
         if record.replies:
-            data["replies"] = record.replies
+            data["replies"] = [cast("JSONValue", reply) for reply in record.replies]
         return data
 
 
@@ -715,7 +780,8 @@ def _load_json_source(path: str | None) -> Mapping[str, object]:
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)
     if not isinstance(payload, Mapping):
-        raise RuntimeError("Input payload must be a JSON object")
+        message = "Input payload must be a JSON object"
+        raise RuntimeError(message)
     return payload
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +24,7 @@ class FakeSlackClient(SlackClientProtocol):
         self.deleted_files: list[str] = []
 
     def resolve_channel(self, identifier: str) -> SlackChannelContext:
+        _ = identifier
         return SlackChannelContext(
             channel_id="C123", channel_name="general", messages=[]
         )
@@ -73,7 +73,7 @@ def _make_runner(fake_client: FakeSlackClient) -> SlackDumpAndReset:
     )
 
 
-def _build_payload(archive_root: Path) -> Mapping[str, Any]:
+def _build_payload(archive_root: Path) -> dict[str, Any]:
     return {
         "command": "x_make_slack_dump_and_reset_x",
         "parameters": {

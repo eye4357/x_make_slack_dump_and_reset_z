@@ -24,7 +24,7 @@ def test_output_schema_accepts_minimal_payload() -> None:
     payload = {
         "status": "success",
         "schema_version": "x_make_slack_dump_and_reset_x.run/1.0",
-    "export_root": "./tmp/sprint",
+        "export_root": "./tmp/sprint",
         "channels": [],
     }
     validate_payload(payload, OUTPUT_SCHEMA)
