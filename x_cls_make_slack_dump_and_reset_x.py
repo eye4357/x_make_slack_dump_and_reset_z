@@ -3,18 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import logging
 import os
 import sys
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
-import requests  # type: ignore[import-not-found]
 from x_make_common_x.json_contracts import validate_payload
 
 from x_make_slack_dump_and_reset_z.json_contracts import (
@@ -24,6 +24,45 @@ from x_make_slack_dump_and_reset_z.json_contracts import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+class ResponseProtocol(Protocol):
+    status_code: int
+    headers: Mapping[str, str]
+
+    def json(self) -> Any: ...
+
+    def iter_content(self, chunk_size: int) -> Iterable[bytes]: ...
+
+    def raise_for_status(self) -> None: ...
+
+
+class SessionProtocol(Protocol):
+    headers: MutableMapping[str, str]
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Mapping[str, str] | None = None,
+        json: Mapping[str, object] | None = None,
+        stream: bool = False,
+    ) -> ResponseProtocol: ...
+
+
+class RequestsModule(Protocol):
+    def Session(self) -> SessionProtocol: ...
+
+
+if TYPE_CHECKING:
+    requests: RequestsModule
+else:  # pragma: no cover - import guard for runtime dependency
+    try:
+        requests = cast("RequestsModule", importlib.import_module("requests"))
+    except ModuleNotFoundError as exc:  # pragma: no cover - surfaced at runtime
+        message = "The 'requests' package is required for Slack exports"
+        raise RuntimeError(message) from exc
 
 SCHEMA_VERSION = "x_make_slack_dump_and_reset_x.run/1.0"
 DEFAULT_EXPORT_SUBDIR = "slack_exports"
@@ -153,10 +192,10 @@ class SlackWebClient:
         self,
         token: str,
         *,
-        session: requests.Session | None = None,
+        session: SessionProtocol | None = None,
         sleeper: Callable[[float], None] = _sleep,
     ) -> None:
-        self._session = session or requests.Session()
+        self._session: SessionProtocol = session or requests.Session()
         self._session.headers.update(
             {
                 "Authorization": f"Bearer {token}",
@@ -360,7 +399,7 @@ class SlackWebClient:
         params: Mapping[str, object] | None = None,
         json: Mapping[str, object] | None = None,
         stream: bool = False,
-    ) -> requests.Response:
+    ) -> ResponseProtocol:
         backoff = 1.0
         while True:
             params_dict = None
@@ -537,7 +576,9 @@ class SlackDumpAndReset:
             "channels": results,
         }
         if info_messages or parameters.notes:
-            output["messages"] = [*parameters.notes, *info_messages]
+            combined_messages: list[str] = list(parameters.notes)
+            combined_messages.extend(info_messages)
+            output["messages"] = combined_messages
         validate_payload(output, OUTPUT_SCHEMA)
         return output
 

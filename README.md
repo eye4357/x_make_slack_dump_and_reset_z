@@ -13,6 +13,9 @@ Listen closely: this playbook moves every syllable and pixel from Slack into the
 - `requests` and the shared utilities from `x_make_common_x`
 - Slack Web API token with scopes capable of reading history, downloading files, and deleting evidence
 
+## Credential Prep
+Follow the `Change Control/0.20.6/slack_token_procedure.md` checklist before every run. It walks through regenerating the admin token, validating scopes with `artifacts/validate_slack_token.py`, and recording approvals in Change Control. Runs that skip the checklist get rejected during QA.
+
 ## Deployment Steps
 1. `python -m venv .venv`
 2. `\.venv\Scripts\Activate.ps1`
@@ -34,6 +37,7 @@ Feed the runner a JSON payload describing channel IDs, archive root, and how agg
 - Only deploy tokens owned by workspace administrators—Slack refuses to let tourists delete other people’s data.
 - Respect retention obligations. If the law demands a trail, toggle `delete_after_export` to `false` and let retention handle the rest.
 - Archive volumes add up; schedule offload from Change Control to cheaper storage if the vault starts bulking up.
+- Token freshness is non-negotiable; document approvals and scope validation output alongside each export bundle.
 
 ## Provenance
 Built in the lab. The Heisenberg tone stays because clarity cuts through the noise.

@@ -143,13 +143,13 @@ def test_run_uses_persistent_token_when_payload_missing(tmp_path: Path) -> None:
     os.environ["SLACK_TOKEN"] = "xoxe-ignored-refresh-token"
     original_resolver = module._resolve_persistent_slack_token
     try:
-        module._resolve_persistent_slack_token = lambda: ("xoxp-from-vault", True)  # type: ignore[assignment]
+        module._resolve_persistent_slack_token = lambda: ("xoxp-from-vault", True)
         result = runner.run(payload)
     finally:
         if original_env is not None:
             os.environ["SLACK_TOKEN"] = original_env
         else:
             os.environ.pop("SLACK_TOKEN", None)
-        module._resolve_persistent_slack_token = original_resolver  # type: ignore[assignment]
+    module._resolve_persistent_slack_token = original_resolver
 
     assert result["status"] == "success"
