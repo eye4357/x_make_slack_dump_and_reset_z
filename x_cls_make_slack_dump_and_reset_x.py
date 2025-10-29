@@ -44,7 +44,9 @@ __all__ = [
 class SlackAPIError(RuntimeError):
     """Raised when the Slack Web API returns an error response."""
 
-    def __init__(self, method: str, error: str, payload: Mapping[str, object] | None = None) -> None:
+    def __init__(
+        self, method: str, error: str, payload: Mapping[str, object] | None = None
+    ) -> None:
         message = f"Slack API call {method!r} failed: {error}"
         super().__init__(message)
         self.method = method
@@ -96,7 +98,9 @@ class SlackClientProtocol(Protocol):
         include_threads: bool,
     ) -> list[SlackMessageRecord]: ...
 
-    def download_file(self, file_record: SlackFileRecord, destination: Path) -> Path: ...
+    def download_file(
+        self, file_record: SlackFileRecord, destination: Path
+    ) -> Path: ...
 
     def delete_message(self, channel_id: str, message_ts: str) -> None: ...
 
@@ -153,10 +157,12 @@ class SlackWebClient:
         sleeper: Callable[[float], None] = _sleep,
     ) -> None:
         self._session = session or requests.Session()
-        self._session.headers.update({
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=utf-8",
-        })
+        self._session.headers.update(
+            {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=utf-8",
+            }
+        )
         self._sleeper = sleeper
         self._channel_cache: dict[str, dict[str, Any]] = {}
         self._channel_name_to_id: dict[str, str] = {}
@@ -166,7 +172,9 @@ class SlackWebClient:
         channel_payload = self._resolve_channel_payload(identifier)
         channel_id = str(channel_payload["id"])
         channel_name = str(channel_payload.get("name", channel_id))
-        return SlackChannelContext(channel_id=channel_id, channel_name=channel_name, messages=[])
+        return SlackChannelContext(
+            channel_id=channel_id, channel_name=channel_name, messages=[]
+        )
 
     def fetch_messages(
         self,
@@ -183,7 +191,9 @@ class SlackWebClient:
             )
             raw_messages = payload.get("messages", [])
             if not isinstance(raw_messages, list):
-                raise SlackAPIError("conversations.history", "invalid_messages_payload", payload)
+                raise SlackAPIError(
+                    "conversations.history", "invalid_messages_payload", payload
+                )
             for raw in raw_messages:
                 if not isinstance(raw, dict):
                     continue
@@ -197,8 +207,11 @@ class SlackWebClient:
     def download_file(self, file_record: SlackFileRecord, destination: Path) -> Path:
         destination.mkdir(parents=True, exist_ok=True)
         if not file_record.download_url:
-            message = f"File {file_record.file_id} has no downloadable URL"
-            raise SlackAPIError("files.download", "missing_download_url", {"file": file_record.file_id})
+            raise SlackAPIError(
+                "files.download",
+                "missing_download_url",
+                {"file": file_record.file_id},
+            )
         response = self._http_request("GET", file_record.download_url, stream=True)
         target_path = destination / Path(file_record.name).name
         with target_path.open("wb") as handle:
@@ -237,7 +250,9 @@ class SlackWebClient:
             self._channel_name_to_id[name] = channel_id
             if channel_id == identifier or name == identifier:
                 return payload
-        raise SlackAPIError("conversations.list", "channel_not_found", {"query": identifier})
+        raise SlackAPIError(
+            "conversations.list", "channel_not_found", {"query": identifier}
+        )
 
     def _iterate_channels(self) -> Iterable[dict[str, Any]]:
         cursor: str | None = None
@@ -248,7 +263,9 @@ class SlackWebClient:
             )
             channels = payload.get("channels", [])
             if not isinstance(channels, list):
-                raise SlackAPIError("conversations.list", "invalid_channels_payload", payload)
+                raise SlackAPIError(
+                    "conversations.list", "invalid_channels_payload", payload
+                )
             for channel in channels:
                 if isinstance(channel, dict):
                     yield channel
@@ -276,7 +293,8 @@ class SlackWebClient:
                 file_record = SlackFileRecord(
                     file_id=file_id,
                     name=str(file_item.get("name", file_id)),
-                    download_url=file_item.get("url_private_download") or file_item.get("url_private"),
+                    download_url=file_item.get("url_private_download")
+                    or file_item.get("url_private"),
                     mimetype=file_item.get("mimetype"),
                     size=file_item.get("size"),
                 )
@@ -415,11 +433,16 @@ class SlackDumpAndReset:
 
         for channel_spec in parameters.channels:
             channel_identifier, label = self._normalise_channel_identifier(channel_spec)
-            if channel_identifier in parameters.skip_channels or label in parameters.skip_channels:
+            if (
+                channel_identifier in parameters.skip_channels
+                or label in parameters.skip_channels
+            ):
                 info_messages.append(f"Skipped channel {label} via configuration")
                 continue
             context = client.resolve_channel(channel_identifier)
-            messages = client.fetch_messages(context.channel_id, include_threads=parameters.include_threads)
+            messages = client.fetch_messages(
+                context.channel_id, include_threads=parameters.include_threads
+            )
             context.messages = messages
             channel_dir = export_folder / context.channel_name
             channel_dir.mkdir(parents=True, exist_ok=True)
@@ -444,7 +467,11 @@ class SlackDumpAndReset:
                             client.download_file(file_record, files_dir)
                             downloaded_files += 1
                         except SlackAPIError as exc:
-                            LOGGER.warning("Failed to download file %s: %s", file_record.file_id, exc)
+                            LOGGER.warning(
+                                "Failed to download file %s: %s",
+                                file_record.file_id,
+                                exc,
+                            )
                             info_messages.append(
                                 f"File download failed for {file_record.file_id} in {context.channel_name}: {exc.error}"
                             )
@@ -463,7 +490,9 @@ class SlackDumpAndReset:
                                 client.delete_file(file_record.file_id)
                             except SlackAPIError as exc:
                                 LOGGER.debug(
-                                    "Failed to delete file %s: %s", file_record.file_id, exc
+                                    "Failed to delete file %s: %s",
+                                    file_record.file_id,
+                                    exc,
                                 )
                                 info_messages.append(
                                     f"File delete failed for {file_record.file_id} in {context.channel_name}: {exc.error}"
@@ -485,14 +514,18 @@ class SlackDumpAndReset:
                 {
                     "channel_id": context.channel_id,
                     "channel_name": context.channel_name,
-                    "message_count": sum(1 + len(msg.replies) for msg in context.messages),
-                    "file_count": downloaded_files if parameters.include_files else expected_files,
+                    "message_count": sum(
+                        1 + len(msg.replies) for msg in context.messages
+                    ),
+                    "file_count": (
+                        downloaded_files if parameters.include_files else expected_files
+                    ),
                     "export_path": str(channel_dir.as_posix()),
                     "deleted": deleted,
                 }
             )
 
-        output = {
+        output: dict[str, object] = {
             "status": "success",
             "schema_version": SCHEMA_VERSION,
             "export_root": export_folder.as_posix(),
@@ -527,7 +560,9 @@ class SlackDumpAndReset:
             if persisted_token and is_valid_slack_access_token(persisted_token):
                 token = persisted_token
         if not isinstance(token, str) or not token:
-            raise RuntimeError("Slack token not provided in payload or SLACK_TOKEN environment variable")
+            raise RuntimeError(
+                "Slack token not provided in payload or SLACK_TOKEN environment variable"
+            )
         archive_root_raw = parameters_raw.get("archive_root")
         if not isinstance(archive_root_raw, str) or not archive_root_raw:
             raise RuntimeError("archive_root must be a non-empty string path")
@@ -539,7 +574,9 @@ class SlackDumpAndReset:
             if (isinstance(item, str) and item) or isinstance(item, Mapping):
                 channels.append(item)
             else:
-                raise RuntimeError("channels entries must be strings or objects with id/name")
+                raise RuntimeError(
+                    "channels entries must be strings or objects with id/name"
+                )
         skip_raw = parameters_raw.get("skip_channels")
         skip_channels: set[str] = set()
         if isinstance(skip_raw, Sequence):
@@ -573,24 +610,34 @@ class SlackDumpAndReset:
             raise FileNotFoundError(f"Archive root does not exist: {archive_root}")
         subdirectories = [item for item in archive_root.iterdir() if item.is_dir()]
         if not subdirectories:
-            raise FileNotFoundError(f"Archive root {archive_root} has no subdirectories to target")
+            raise FileNotFoundError(
+                f"Archive root {archive_root} has no subdirectories to target"
+            )
         latest_directory = max(subdirectories, key=lambda item: item.stat().st_mtime)
         return latest_directory
 
     @staticmethod
-    def _normalise_channel_identifier(channel_spec: str | Mapping[str, object]) -> tuple[str, str]:
+    def _normalise_channel_identifier(
+        channel_spec: str | Mapping[str, object],
+    ) -> tuple[str, str]:
         if isinstance(channel_spec, Mapping):
             channel_id = channel_spec.get("id")
             channel_name = channel_spec.get("name")
             if isinstance(channel_id, str) and channel_id:
-                label = channel_name if isinstance(channel_name, str) and channel_name else channel_id
+                label = (
+                    channel_name
+                    if isinstance(channel_name, str) and channel_name
+                    else channel_id
+                )
                 return channel_id, label
             if isinstance(channel_name, str) and channel_name:
                 return channel_name, channel_name
             raise RuntimeError("Channel mapping must provide 'id' or 'name'")
         if isinstance(channel_spec, str) and channel_spec:
             return channel_spec, channel_spec.lstrip("#")
-        raise RuntimeError("Channel specification must be a non-empty string or mapping")
+        raise RuntimeError(
+            "Channel specification must be a non-empty string or mapping"
+        )
 
     @staticmethod
     def _serialise_message(record: SlackMessageRecord) -> dict[str, Any]:
@@ -643,11 +690,17 @@ def _prompt_delete_confirmation(payload: Mapping[str, object]) -> None:
         return
 
     while True:
-        response = input(
-            "Archive captured. Delete Slack messages and files after export? [y/N]: "
-        ).strip().lower()
+        response = (
+            input(
+                "Archive captured. Delete Slack messages and files after export? [y/N]: "
+            )
+            .strip()
+            .lower()
+        )
         if response in {"y", "yes"}:
-            print("Confirmed. Slack source will be purged post-export.", file=sys.stderr)
+            print(
+                "Confirmed. Slack source will be purged post-export.", file=sys.stderr
+            )
             return
         if response in {"", "n", "no"}:
             parameters_obj["delete_after_export"] = False
@@ -665,7 +718,9 @@ def _run_cli() -> int:
         description="Export and reset Slack channels using JSON contracts.",
     )
     parser.add_argument("--input", help="Path to JSON payload (default: stdin)")
-    parser.add_argument("--output", help="File path to write JSON response (default: stdout)")
+    parser.add_argument(
+        "--output", help="File path to write JSON response (default: stdout)"
+    )
     args = parser.parse_args()
 
     try:

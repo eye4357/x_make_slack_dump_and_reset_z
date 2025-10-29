@@ -25,7 +25,9 @@ class FakeSlackClient(SlackClientProtocol):
         self.deleted_files: list[str] = []
 
     def resolve_channel(self, identifier: str) -> SlackChannelContext:
-        return SlackChannelContext(channel_id="C123", channel_name="general", messages=[])
+        return SlackChannelContext(
+            channel_id="C123", channel_name="general", messages=[]
+        )
 
     def fetch_messages(
         self,
@@ -65,7 +67,10 @@ class FakeSlackClient(SlackClientProtocol):
 
 
 def _make_runner(fake_client: FakeSlackClient) -> SlackDumpAndReset:
-    return SlackDumpAndReset(client_factory=lambda token: fake_client, time_provider=lambda: datetime(2025, 10, 26, tzinfo=UTC))
+    return SlackDumpAndReset(
+        client_factory=lambda token: fake_client,
+        time_provider=lambda: datetime(2025, 10, 26, tzinfo=UTC),
+    )
 
 
 def _build_payload(archive_root: Path) -> Mapping[str, Any]:
