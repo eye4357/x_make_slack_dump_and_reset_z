@@ -176,6 +176,11 @@ class SlackWebClient:
             channel_id=channel_id, channel_name=channel_name, messages=[]
         )
 
+    def iter_channels(self) -> Iterable[dict[str, Any]]:
+        """Yield channel payloads from the Slack API."""
+
+        yield from self._iterate_channels()
+
     def fetch_messages(
         self,
         channel_id: str,
