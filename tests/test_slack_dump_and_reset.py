@@ -5,7 +5,10 @@ import os
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from pytest import MonkeyPatch  # noqa: PT013
 
 from x_make_slack_dump_and_reset_z.x_cls_make_slack_dump_and_reset_x import (
     SCHEMA_VERSION,
@@ -129,11 +132,13 @@ def test_run_exports_messages_and_deletes(tmp_path: Path) -> None:
     )
     channels_obj = result["channels"]
     if not isinstance(channels_obj, list):
-        raise AssertionError("channels must be a list")
+        message = "channels must be a list"
+        raise TypeError(message)
     expect(condition=bool(channels_obj), message="channels result should not be empty")
     channel_mapping_raw = channels_obj[0]
     if not isinstance(channel_mapping_raw, Mapping):
-        raise AssertionError("channel entry must be mapping")
+        message = "channel entry must be mapping"
+        raise TypeError(message)
     channel_mapping = cast("Mapping[str, object]", channel_mapping_raw)
     channel_data = dict(channel_mapping)
     expect(
@@ -150,7 +155,8 @@ def test_run_exports_messages_and_deletes(tmp_path: Path) -> None:
     )
     export_path_value = channel_data.get("export_path")
     if not isinstance(export_path_value, str):
-        raise AssertionError("export_path must be string")
+        message = "export_path must be string"
+        raise TypeError(message)
     export_path = Path(export_path_value)
     expect(
         condition=export_path.exists(),
@@ -163,11 +169,13 @@ def test_run_exports_messages_and_deletes(tmp_path: Path) -> None:
     )
     messages_raw: object = json.loads(messages_file.read_text(encoding="utf-8"))
     if not isinstance(messages_raw, list):
-        raise AssertionError("Messages must be list")
+        message = "Messages must be list"
+        raise TypeError(message)
     expect(condition=bool(messages_raw), message="Messages list should not be empty")
     first_message_raw = messages_raw[0]
     if not isinstance(first_message_raw, Mapping):
-        raise AssertionError("Message must be mapping")
+        message = "Message must be mapping"
+        raise TypeError(message)
     first_message = dict(cast("Mapping[str, object]", first_message_raw))
     expect(
         condition=first_message.get("text") == "Hello world",
@@ -187,7 +195,10 @@ def test_run_exports_messages_and_deletes(tmp_path: Path) -> None:
     )
 
 
-def test_run_uses_persistent_token_when_payload_missing(tmp_path: Path) -> None:
+def test_run_uses_persistent_token_when_payload_missing(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
     change_control = tmp_path / "Change Control"
     _prepare_archive_root(change_control)
     fake_client = FakeSlackClient()
@@ -204,15 +215,9 @@ def test_run_uses_persistent_token_when_payload_missing(tmp_path: Path) -> None:
         },
     }
 
-    original_env = os.environ.get("SLACK_TOKEN")
-    os.environ["SLACK_TOKEN"] = "placeholder-token"
-    try:
-        result = runner.run(payload)
-    finally:
-        if original_env is not None:
-            os.environ["SLACK_TOKEN"] = original_env
-        else:
-            os.environ.pop("SLACK_TOKEN", None)
+    monkeypatch.setenv("SLACK_TOKEN", "placeholder-token")
+    result = runner.run(payload)
+    monkeypatch.delenv("SLACK_TOKEN", raising=False)
 
     expect(
         condition=result["status"] == "success",

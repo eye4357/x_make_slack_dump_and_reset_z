@@ -117,11 +117,12 @@ class PersistentEnvReaderFactoryProtocol(Protocol):
 
 if TYPE_CHECKING:
     requests: RequestsModule
-    from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (  # type: ignore import-not-found
-        x_cls_make_persistent_env_var_x as ImportedPersistentEnvFactory,
+    from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (  # type: ignore[import-not-found]
+        x_cls_make_persistent_env_var_x as imported_persistent_env_factory,
     )
-    PersistentEnvReaderFactory: PersistentEnvReaderFactoryProtocol | None = (
-        cast("PersistentEnvReaderFactoryProtocol", ImportedPersistentEnvFactory)
+
+    PersistentEnvReaderFactory: PersistentEnvReaderFactoryProtocol | None = cast(
+        "PersistentEnvReaderFactoryProtocol", imported_persistent_env_factory
     )
 else:  # pragma: no cover - import guard for runtime dependency
     try:
@@ -131,10 +132,11 @@ else:  # pragma: no cover - import guard for runtime dependency
         raise RuntimeError(message) from exc
     try:
         from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (
-            x_cls_make_persistent_env_var_x as ImportedPersistentEnvFactory,
+            x_cls_make_persistent_env_var_x as imported_persistent_env_factory,
         )
+
         PersistentEnvReaderFactory = cast(
-            "PersistentEnvReaderFactoryProtocol", ImportedPersistentEnvFactory
+            "PersistentEnvReaderFactoryProtocol", imported_persistent_env_factory
         )
     except ImportError:  # pragma: no cover - optional dependency resolved at runtime
         PersistentEnvReaderFactory = None
@@ -612,10 +614,10 @@ class SlackDumpAndReset:
     def _normalise_channels(
         self, channels: Sequence[str | Mapping[str, object]]
     ) -> list[tuple[str, str]]:
-        normalised: list[tuple[str, str]] = []
-        for channel_spec in channels:
-            normalised.append(self._normalise_channel_identifier(channel_spec))
-        return normalised
+        return [
+            self._normalise_channel_identifier(channel_spec)
+            for channel_spec in channels
+        ]
 
     def _export_channel(
         self,
@@ -636,16 +638,15 @@ class SlackDumpAndReset:
         downloaded_files, download_messages = self._download_channel_files(
             client,
             context,
-            channel_dir,
-            expected_files,
-            parameters.include_files,
-            parameters.dry_run,
+            channel_dir=channel_dir,
+            include_files=parameters.include_files,
+            dry_run=parameters.dry_run,
         )
         deleted, delete_messages = self._maybe_delete_history(
             client,
             context,
-            parameters.delete_after_export,
-            parameters.dry_run,
+            delete_after_export=parameters.delete_after_export,
+            dry_run=parameters.dry_run,
         )
         channel_messages = [*download_messages, *delete_messages]
         message_count = sum(1 + len(msg.replies) for msg in context.messages)
@@ -682,16 +683,19 @@ class SlackDumpAndReset:
         self,
         client: SlackClientProtocol,
         context: SlackChannelContext,
+        *,
         channel_dir: Path,
-        expected_files: int,
         include_files: bool,
         dry_run: bool,
     ) -> tuple[int, list[str]]:
         info_messages: list[str] = []
         downloaded_files = 0
-        if not include_files or expected_files == 0:
+        if not include_files:
             return downloaded_files, info_messages
         files_dir = channel_dir / "files"
+        has_files = any(message.files for message in context.messages)
+        if not has_files:
+            return downloaded_files, info_messages
         for message in context.messages:
             for file_record in message.files:
                 if dry_run:
@@ -717,6 +721,7 @@ class SlackDumpAndReset:
         self,
         client: SlackClientProtocol,
         context: SlackChannelContext,
+        *,
         delete_after_export: bool,
         dry_run: bool,
     ) -> tuple[bool, list[str]]:
@@ -798,10 +803,8 @@ class SlackDumpAndReset:
 
     def _create_client(self, token: str) -> SlackClientProtocol:
         if self._client_factory is not None:
-            factory = self._client_factory
-        else:
-            factory = cast("Callable[[str], SlackClientProtocol]", SlackWebClient)
-        return factory(token)
+            return self._client_factory(token)
+        return SlackWebClient(token)
 
     def _parse_parameters(self, payload: Mapping[str, object]) -> SlackDumpParameters:
         parameters_raw = self._extract_parameters(payload)
@@ -810,15 +813,25 @@ class SlackDumpAndReset:
         channels = self._parse_channels(parameters_raw)
         skip_channels = self._parse_skip_channels(parameters_raw)
         delete_after_export = self._coerce_bool_option(
-            parameters_raw, "delete_after_export", True
+            parameters_raw,
+            "delete_after_export",
+            default=True,
         )
         include_files = self._coerce_bool_option(
-            parameters_raw, "include_files", True
+            parameters_raw,
+            "include_files",
+            default=True,
         )
         include_threads = self._coerce_bool_option(
-            parameters_raw, "include_threads", True
+            parameters_raw,
+            "include_threads",
+            default=True,
         )
-        dry_run = self._coerce_bool_option(parameters_raw, "dry_run", False)
+        dry_run = self._coerce_bool_option(
+            parameters_raw,
+            "dry_run",
+            default=False,
+        )
         notes = self._parse_notes(parameters_raw)
         return SlackDumpParameters(
             slack_token=token,
@@ -851,7 +864,9 @@ class SlackDumpAndReset:
             return token
         env_value = os.getenv("SLACK_TOKEN")
         env_token = (
-            env_value.strip() if isinstance(env_value, str) and env_value.strip() else None
+            env_value.strip()
+            if isinstance(env_value, str) and env_value.strip()
+            else None
         )
         if env_token and is_valid_slack_access_token(env_token):
             return env_token
@@ -859,8 +874,7 @@ class SlackDumpAndReset:
         if persisted_token and is_valid_slack_access_token(persisted_token):
             return persisted_token
         message = (
-            "Slack token not provided in payload or SLACK_TOKEN environment "
-            "variable"
+            "Slack token not provided in payload or SLACK_TOKEN environment variable"
         )
         raise RuntimeError(message)
 
@@ -902,7 +916,10 @@ class SlackDumpAndReset:
 
     @staticmethod
     def _coerce_bool_option(
-        parameters_raw: Mapping[str, object], key: str, default: bool
+        parameters_raw: Mapping[str, object],
+        key: str,
+        *,
+        default: bool,
     ) -> bool:
         value = parameters_raw.get(key)
         if value is None:
