@@ -117,7 +117,7 @@ class PersistentEnvReaderFactoryProtocol(Protocol):
 
 if TYPE_CHECKING:
     requests: RequestsModule
-    from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (  # type: ignore[import-not-found]
+    from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (
         x_cls_make_persistent_env_var_x as imported_persistent_env_factory,
     )
 
@@ -888,7 +888,7 @@ class SlackDumpAndReset:
 
     @staticmethod
     def _parse_channels(
-        parameters_raw: Mapping[str, object]
+        parameters_raw: Mapping[str, object],
     ) -> list[str | Mapping[str, object]]:
         channels_raw = parameters_raw.get("channels")
         if (
@@ -949,9 +949,7 @@ class SlackDumpAndReset:
             raise FileNotFoundError(message)
         subdirectories = [item for item in archive_root.iterdir() if item.is_dir()]
         if not subdirectories:
-            message = (
-                f"Archive root {archive_root} has no subdirectories to target"
-            )
+            message = f"Archive root {archive_root} has no subdirectories to target"
             raise FileNotFoundError(message)
         return max(subdirectories, key=lambda item: item.stat().st_mtime)
 
@@ -1040,8 +1038,7 @@ def _prompt_delete_confirmation(payload: Mapping[str, object]) -> None:
 
     while True:
         prompt = (
-            "Archive captured. Delete Slack messages and files after export?"
-            " [y/N]: "
+            "Archive captured. Delete Slack messages and files after export?" " [y/N]: "
         )
         response = input(prompt).strip().lower()
         if response in {"y", "yes"}:
