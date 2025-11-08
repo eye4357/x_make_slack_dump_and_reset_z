@@ -117,29 +117,26 @@ class PersistentEnvReaderFactoryProtocol(Protocol):
 
 if TYPE_CHECKING:
     requests: RequestsModule
-    from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (
-        x_cls_make_persistent_env_var_x as imported_persistent_env_factory,
-    )
-
+    # TYPE_CHECKING import retained so type checkers see factory signature
+    try:
+        from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (
+            x_cls_make_persistent_env_var_x as imported_persistent_env_factory,
+        )
+    except Exception:  # pragma: no cover - ignore missing during type checking
+        imported_persistent_env_factory = None  # type: ignore
     PersistentEnvReaderFactory: PersistentEnvReaderFactoryProtocol | None = cast(
         "PersistentEnvReaderFactoryProtocol", imported_persistent_env_factory
     )
-else:  # pragma: no cover - import guard for runtime dependency
+else:  # pragma: no cover - runtime import isolation
     try:
         requests = cast("RequestsModule", importlib.import_module("requests"))
     except ModuleNotFoundError as exc:  # pragma: no cover - surfaced at runtime
         message = "The 'requests' package is required for Slack exports"
         raise RuntimeError(message) from exc
-    try:
-        from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (
-            x_cls_make_persistent_env_var_x as imported_persistent_env_factory,
-        )
 
-        PersistentEnvReaderFactory = cast(
-            "PersistentEnvReaderFactoryProtocol", imported_persistent_env_factory
-        )
-    except ImportError:  # pragma: no cover - optional dependency resolved at runtime
-        PersistentEnvReaderFactory = None
+    # SECURITY ISOLATION: Never import the persistent env var tool in this flow.
+    # There is no opt-in path here; run the token getter/setter as a standalone tool.
+    PersistentEnvReaderFactory = None
 
 SCHEMA_VERSION = "x_make_slack_dump_and_reset_x.run/1.0"
 DEFAULT_EXPORT_SUBDIR = "slack_exports"
@@ -243,11 +240,13 @@ def is_valid_slack_access_token(token: str) -> bool:
 
 
 def _resolve_persistent_slack_token() -> tuple[str | None, bool]:
-    """Return a Slack token from the persistent vault when available."""
+    """Return a Slack token from the persistent vault when explicitly enabled.
 
+    The persistent env var mechanism is treated as a "shameful secret" — it
+    must be consciously opted into and otherwise remains dormant.
+    """
     if PersistentEnvReaderFactory is None:
         return None, False
-
     reader = PersistentEnvReaderFactory("SLACK_TOKEN", quiet=True)
     persisted: str | None = None
     with suppress(Exception):

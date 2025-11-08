@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
 if TYPE_CHECKING:
     from pytest import MonkeyPatch  # noqa: PT013
@@ -18,11 +19,6 @@ from x_make_slack_dump_and_reset_z.x_cls_make_slack_dump_and_reset_x import (
     SlackFileRecord,
     SlackMessageRecord,
 )
-
-
-def expect(*, condition: bool, message: str) -> None:
-    if not condition:
-        raise AssertionError(message)
 
 
 class FakeSlackClient(SlackClientProtocol):
@@ -93,10 +89,11 @@ def _make_runner(
 
 
 def _build_payload(archive_root: Path) -> dict[str, object]:
+    token_value = f"xoxb-{uuid4().hex}"
     return {
         "command": "x_make_slack_dump_and_reset_x",
         "parameters": {
-            "slack_token": "slack-token",
+            "slack_token": token_value,
             "channels": ["general"],
             "archive_root": str(archive_root),
         },
@@ -122,77 +119,44 @@ def test_run_exports_messages_and_deletes(tmp_path: Path) -> None:
     payload = _build_payload(change_control)
     result = runner.run(payload)
 
-    expect(
-        condition=result["status"] == "success",
-        message="Run should mark status as success",
-    )
-    expect(
-        condition=result["schema_version"] == SCHEMA_VERSION,
-        message="Schema version should match contract",
-    )
+    assert result["status"] == "success"
+    assert result["schema_version"] == SCHEMA_VERSION
     channels_obj = result["channels"]
     if not isinstance(channels_obj, list):
         message = "channels must be a list"
         raise TypeError(message)
-    expect(condition=bool(channels_obj), message="channels result should not be empty")
+    assert channels_obj, "channels result should not be empty"
     channel_mapping_raw = channels_obj[0]
     if not isinstance(channel_mapping_raw, Mapping):
         message = "channel entry must be mapping"
         raise TypeError(message)
     channel_mapping = cast("Mapping[str, object]", channel_mapping_raw)
     channel_data = dict(channel_mapping)
-    expect(
-        condition=channel_data.get("channel_name") == "general",
-        message="Channel name should be general",
-    )
-    expect(
-        condition=channel_data.get("deleted") is True,
-        message="Channel should be marked deleted",
-    )
-    expect(
-        condition=channel_data.get("file_count") == 1,
-        message="File count should reflect exported files",
-    )
+    assert channel_data.get("channel_name") == "general"
+    assert channel_data.get("deleted") is True
+    assert channel_data.get("file_count") == 1
     export_path_value = channel_data.get("export_path")
     if not isinstance(export_path_value, str):
         message = "export_path must be string"
         raise TypeError(message)
     export_path = Path(export_path_value)
-    expect(
-        condition=export_path.exists(),
-        message="Export directory should exist",
-    )
+    assert export_path.exists()
     messages_file = export_path / "messages.json"
-    expect(
-        condition=messages_file.exists(),
-        message="messages.json should be written",
-    )
+    assert messages_file.exists()
     messages_raw: object = json.loads(messages_file.read_text(encoding="utf-8"))
     if not isinstance(messages_raw, list):
         message = "Messages must be list"
         raise TypeError(message)
-    expect(condition=bool(messages_raw), message="Messages list should not be empty")
+    assert messages_raw, "Messages list should not be empty"
     first_message_raw = messages_raw[0]
     if not isinstance(first_message_raw, Mapping):
         message = "Message must be mapping"
         raise TypeError(message)
     first_message = dict(cast("Mapping[str, object]", first_message_raw))
-    expect(
-        condition=first_message.get("text") == "Hello world",
-        message="Expected message text not found",
-    )
-    expect(
-        condition=bool(fake_client.downloaded),
-        message="Files should be downloaded",
-    )
-    expect(
-        condition=bool(fake_client.deleted_messages),
-        message="Messages should be deleted",
-    )
-    expect(
-        condition="F123" in fake_client.deleted_files,
-        message="File deletion should include F123",
-    )
+    assert first_message.get("text") == "Hello world"
+    assert fake_client.downloaded
+    assert fake_client.deleted_messages
+    assert "F123" in fake_client.deleted_files
 
 
 def test_run_uses_persistent_token_when_payload_missing(
@@ -215,11 +179,8 @@ def test_run_uses_persistent_token_when_payload_missing(
         },
     }
 
-    monkeypatch.setenv("SLACK_TOKEN", "placeholder-token")
+    monkeypatch.setenv("SLACK_TOKEN", f"xoxb-{uuid4().hex}")
     result = runner.run(payload)
     monkeypatch.delenv("SLACK_TOKEN", raising=False)
 
-    expect(
-        condition=result["status"] == "success",
-        message="Persistent token should allow successful run",
-    )
+    assert result["status"] == "success"
