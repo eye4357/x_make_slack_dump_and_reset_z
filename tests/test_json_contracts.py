@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from x_make_common_x.json_contracts import validate_payload
-
 from x_make_slack_dump_and_reset_z.json_contracts import (
     ERROR_SCHEMA,
     INPUT_SCHEMA,
