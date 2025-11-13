@@ -116,16 +116,17 @@ class PersistentEnvReaderFactoryProtocol(Protocol):
 
 if TYPE_CHECKING:
     requests: RequestsModule
-    # TYPE_CHECKING import retained so type checkers see factory signature
     try:
         from x_make_persistent_env_var_x.x_cls_make_persistent_env_var_x import (
-            x_cls_make_persistent_env_var_x as imported_persistent_env_factory,
+            x_cls_make_persistent_env_var_x as _PersistentEnvFactory,
         )
     except Exception:  # pragma: no cover - ignore missing during type checking
-        imported_persistent_env_factory = None  # type: ignore
-    PersistentEnvReaderFactory: PersistentEnvReaderFactoryProtocol | None = cast(
-        "PersistentEnvReaderFactoryProtocol", imported_persistent_env_factory
-    )
+        PersistentEnvReaderFactory: PersistentEnvReaderFactoryProtocol | None = None
+    else:
+        PersistentEnvReaderFactory = cast(
+            "PersistentEnvReaderFactoryProtocol",
+            _PersistentEnvFactory,
+        )
 else:  # pragma: no cover - runtime import isolation
     try:
         requests = cast("RequestsModule", importlib.import_module("requests"))
